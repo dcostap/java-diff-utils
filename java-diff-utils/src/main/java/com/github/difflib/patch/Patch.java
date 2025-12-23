@@ -22,6 +22,7 @@ package com.github.difflib.patch;
 import static java.util.Comparator.comparing;
 
 import com.github.difflib.algorithm.Change;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,318 +33,363 @@ import java.util.ListIterator;
  * Describes the patch holding all deltas between the original and revised
  * texts.
  *
- * @author <a href="dm.naumenko@gmail.com">Dmitry Naumenko</a>
  * @param <T> The type of the compared elements in the 'lines'.
+ * @author <a href="dm.naumenko@gmail.com">Dmitry Naumenko</a>
  */
 public final class Patch<T> implements Serializable {
 
-		private final List<AbstractDelta<T>> deltas;
+    private final List<AbstractDelta<T>> deltas;
 
-		public Patch() {
-				this(10);
-		}
+    public Patch() {
+        this(10);
+    }
 
-		public Patch(int estimatedPatchSize) {
-				deltas = new ArrayList<>(estimatedPatchSize);
-		}
+    public Patch(int estimatedPatchSize) {
+        deltas = new ArrayList<>(estimatedPatchSize);
+    }
 
-		/**
-		 * Creates a new list, the patch is being applied to.
-		 *
-		 * @param target The list to apply the changes to.
-		 * @return A new list containing the applied patch.
-		 * @throws PatchFailedException if the patch cannot be applied
-		 */
-		public List<T> applyTo(List<? extends T> target) throws PatchFailedException {
-				List<T> result = new ArrayList<>(target);
-				applyToExisting(result);
-				return result;
-		}
+    /**
+     * Creates a new list, the patch is being applied to.
+     *
+     * @param target The list to apply the changes to.
+     * @return A new list containing the applied patch.
+     * @throws PatchFailedException if the patch cannot be applied
+     */
+    public List<T> applyTo(List<? extends T> target) throws PatchFailedException {
+        // Optimization: If using the default conflict handler (Exception),
+        // use single-pass construction to avoid O(N^2) shifting behavior.
+        if (conflictOutput == CONFLICT_PRODUCES_EXCEPTION) {
+            List<AbstractDelta<T>> sortedDeltas = getDeltas();
+            List<T> result = new ArrayList<>(target.size());
+            int cursor = 0;
 
-		/**
-		 * Applies the patch to the supplied list.
-		 *
-		 * @param target The list to apply the changes to. This list has to be modifiable,
-		 *               otherwise exceptions may be thrown, depending on the used type of list.
-		 * @throws PatchFailedException if the patch cannot be applied
-		 * @throws RuntimeException (or similar) if the list is not modifiable.
-		 */
-		public void applyToExisting(List<T> target) throws PatchFailedException {
-				ListIterator<AbstractDelta<T>> it = getDeltas().listIterator(deltas.size());
-				while (it.hasPrevious()) {
-						AbstractDelta<T> delta = it.previous();
-						VerifyChunk valid = delta.verifyAndApplyTo(target);
-						if (valid != VerifyChunk.OK) {
-								conflictOutput.processConflict(valid, delta, target);
-						}
-				}
-		}
+            for (AbstractDelta<T> delta : sortedDeltas) {
+                int startPos = delta.getSource().getPosition();
 
-		private static class PatchApplyingContext<T> {
-				public final List<T> result;
-				public final int maxFuzz;
+                // Check for overlapping patches (fallback to old behavior if found)
+                if (startPos < cursor) {
+                    List<T> fallbackResult = new ArrayList<>(target);
+                    applyToExisting(fallbackResult);
+                    return fallbackResult;
+                }
 
-				// the position last patch applied to.
-				public int lastPatchEnd = -1;
+                // 1. Verify the chunk matches the original target
+                VerifyChunk valid = delta.getSource().verifyChunk((List<T>) target);
+                if (valid != VerifyChunk.OK) {
+                    throw new PatchFailedException("could not apply patch due to " + valid.toString());
+                }
 
-				///// passing values from find to apply
-				public int currentFuzz = 0;
+                // 2. Copy the unchanged text between the last patch and this one
+                if (startPos > cursor) {
+                    result.addAll(target.subList(cursor, startPos));
+                }
 
-				public int defaultPosition;
-				public boolean beforeOutRange = false;
-				public boolean afterOutRange = false;
+                // 3. Append the NEW text from the patch
+                result.addAll(delta.getTarget().getLines());
 
-				private PatchApplyingContext(List<T> result, int maxFuzz) {
-						this.result = result;
-						this.maxFuzz = maxFuzz;
-				}
-		}
+                // 4. Update cursor to skip the old text that was replaced
+                cursor = startPos + delta.getSource().size();
+            }
 
-		public List<T> applyFuzzy(List<T> target, int maxFuzz) throws PatchFailedException {
-				PatchApplyingContext<T> ctx = new PatchApplyingContext<>(new ArrayList<>(target), maxFuzz);
+            // 5. Copy the remaining text after the last patch
+            if (cursor < target.size()) {
+                result.addAll(target.subList(cursor, target.size()));
+            }
 
-				// the difference between patch's position and actually applied position
-				int lastPatchDelta = 0;
+            return result;
+        } else {
+            // If using custom conflict handling (e.g. Merge Conflict markers),
+            // we must use the slower in-place modification to preserve logic.
+            List<T> result = new ArrayList<>(target);
+            applyToExisting(result);
+            return result;
+        }
+    }
 
-				for (AbstractDelta<T> delta : getDeltas()) {
-						ctx.defaultPosition = delta.getSource().getPosition() + lastPatchDelta;
-						int patchPosition = findPositionFuzzy(ctx, delta);
-						if (0 <= patchPosition) {
-								delta.applyFuzzyToAt(ctx.result, ctx.currentFuzz, patchPosition);
-								lastPatchDelta = patchPosition - delta.getSource().getPosition();
-								ctx.lastPatchEnd = delta.getSource().last() + lastPatchDelta;
-						} else {
-								conflictOutput.processConflict(VerifyChunk.CONTENT_DOES_NOT_MATCH_TARGET, delta, ctx.result);
-						}
-				}
+    /**
+     * Applies the patch to the supplied list.
+     *
+     * @param target The list to apply the changes to. This list has to be modifiable,
+     *               otherwise exceptions may be thrown, depending on the used type of list.
+     * @throws PatchFailedException if the patch cannot be applied
+     * @throws RuntimeException     (or similar) if the list is not modifiable.
+     */
+    public void applyToExisting(List<T> target) throws PatchFailedException {
+        ListIterator<AbstractDelta<T>> it = getDeltas().listIterator(deltas.size());
+        while (it.hasPrevious()) {
+            AbstractDelta<T> delta = it.previous();
+            VerifyChunk valid = delta.verifyAndApplyTo(target);
+            if (valid != VerifyChunk.OK) {
+                conflictOutput.processConflict(valid, delta, target);
+            }
+        }
+    }
 
-				return ctx.result;
-		}
+    private static class PatchApplyingContext<T> {
+        public final List<T> result;
+        public final int maxFuzz;
 
-		// negative for not found
-		private int findPositionFuzzy(PatchApplyingContext<T> ctx, AbstractDelta<T> delta) throws PatchFailedException {
-				for (int fuzz = 0; fuzz <= ctx.maxFuzz; fuzz++) {
-						ctx.currentFuzz = fuzz;
-						int foundPosition = findPositionWithFuzz(ctx, delta, fuzz);
-						if (foundPosition >= 0) {
-								return foundPosition;
-						}
-				}
-				return -1;
-		}
+        // the position last patch applied to.
+        public int lastPatchEnd = -1;
 
-		// negative for not found
-		private int findPositionWithFuzz(PatchApplyingContext<T> ctx, AbstractDelta<T> delta, int fuzz)
-						throws PatchFailedException {
-				if (delta.getSource().verifyChunk(ctx.result, fuzz, ctx.defaultPosition) == VerifyChunk.OK) {
-						return ctx.defaultPosition;
-				}
+        /// // passing values from find to apply
+        public int currentFuzz = 0;
 
-				ctx.beforeOutRange = false;
-				ctx.afterOutRange = false;
+        public int defaultPosition;
+        public boolean beforeOutRange = false;
+        public boolean afterOutRange = false;
 
-				// moreDelta >= 0: just for overflow guard, not a normal condition
-				//noinspection OverflowingLoopIndex
-				for (int moreDelta = 0; moreDelta >= 0; moreDelta++) {
-						int pos = findPositionWithFuzzAndMoreDelta(ctx, delta, fuzz, moreDelta);
-						if (pos >= 0) {
-								return pos;
-						}
-						if (ctx.beforeOutRange && ctx.afterOutRange) {
-								break;
-						}
-				}
+        private PatchApplyingContext(List<T> result, int maxFuzz) {
+            this.result = result;
+            this.maxFuzz = maxFuzz;
+        }
+    }
 
-				return -1;
-		}
+    public List<T> applyFuzzy(List<T> target, int maxFuzz) throws PatchFailedException {
+        PatchApplyingContext<T> ctx = new PatchApplyingContext<>(new ArrayList<>(target), maxFuzz);
 
-		// negative for not found
-		private int findPositionWithFuzzAndMoreDelta(
-						PatchApplyingContext<T> ctx, AbstractDelta<T> delta, int fuzz, int moreDelta) throws PatchFailedException {
-				// range check: can't apply before end of last patch
-				if (!ctx.beforeOutRange) {
-						int beginAt = ctx.defaultPosition - moreDelta + fuzz;
-						// We can't apply patch before end of last patch.
-						if (beginAt <= ctx.lastPatchEnd) {
-								ctx.beforeOutRange = true;
-						}
-				}
-				// range check: can't apply after end of result
-				if (!ctx.afterOutRange) {
-						int beginAt = ctx.defaultPosition + moreDelta + delta.getSource().size() - fuzz;
-						// We can't apply patch before end of last patch.
-						if (ctx.result.size() < beginAt) {
-								ctx.afterOutRange = true;
-						}
-				}
+        // the difference between patch's position and actually applied position
+        int lastPatchDelta = 0;
 
-				if (!ctx.beforeOutRange) {
-						VerifyChunk before = delta.getSource().verifyChunk(ctx.result, fuzz, ctx.defaultPosition - moreDelta);
-						if (before == VerifyChunk.OK) {
-								return ctx.defaultPosition - moreDelta;
-						}
-				}
-				if (!ctx.afterOutRange) {
-						VerifyChunk after = delta.getSource().verifyChunk(ctx.result, fuzz, ctx.defaultPosition + moreDelta);
-						if (after == VerifyChunk.OK) {
-								return ctx.defaultPosition + moreDelta;
-						}
-				}
-				return -1;
-		}
+        for (AbstractDelta<T> delta : getDeltas()) {
+            ctx.defaultPosition = delta.getSource().getPosition() + lastPatchDelta;
+            int patchPosition = findPositionFuzzy(ctx, delta);
+            if (0 <= patchPosition) {
+                delta.applyFuzzyToAt(ctx.result, ctx.currentFuzz, patchPosition);
+                lastPatchDelta = patchPosition - delta.getSource().getPosition();
+                ctx.lastPatchEnd = delta.getSource().last() + lastPatchDelta;
+            } else {
+                conflictOutput.processConflict(VerifyChunk.CONTENT_DOES_NOT_MATCH_TARGET, delta, ctx.result);
+            }
+        }
 
-		/**
-		 * Standard Patch behaviour to throw an exception for pathching conflicts.
-		 */
-		public final ConflictOutput<T> CONFLICT_PRODUCES_EXCEPTION =
-						(VerifyChunk verifyChunk, AbstractDelta<T> delta, List<T> result) -> {
-								throw new PatchFailedException("could not apply patch due to " + verifyChunk.toString());
-						};
+        return ctx.result;
+    }
 
-		/**
-		 * Git like merge conflict output.
-		 */
-		public static final ConflictOutput<String> CONFLICT_PRODUCES_MERGE_CONFLICT =
-						(VerifyChunk verifyChunk, AbstractDelta<String> delta, List<String> result) -> {
-								if (result.size() > delta.getSource().getPosition()) {
-										List<String> orgData = new ArrayList<>();
+    // negative for not found
+    private int findPositionFuzzy(PatchApplyingContext<T> ctx, AbstractDelta<T> delta) throws PatchFailedException {
+        for (int fuzz = 0; fuzz <= ctx.maxFuzz; fuzz++) {
+            ctx.currentFuzz = fuzz;
+            int foundPosition = findPositionWithFuzz(ctx, delta, fuzz);
+            if (foundPosition >= 0) {
+                return foundPosition;
+            }
+        }
+        return -1;
+    }
 
-										for (int i = 0; i < delta.getSource().size(); i++) {
-												orgData.add(result.get(delta.getSource().getPosition()));
-												result.remove(delta.getSource().getPosition());
-										}
+    // negative for not found
+    private int findPositionWithFuzz(PatchApplyingContext<T> ctx, AbstractDelta<T> delta, int fuzz)
+            throws PatchFailedException {
+        if (delta.getSource().verifyChunk(ctx.result, fuzz, ctx.defaultPosition) == VerifyChunk.OK) {
+            return ctx.defaultPosition;
+        }
 
-										orgData.add(0, "<<<<<< HEAD");
-										orgData.add("======");
-										orgData.addAll(delta.getSource().getLines());
-										orgData.add(">>>>>>> PATCH");
+        ctx.beforeOutRange = false;
+        ctx.afterOutRange = false;
 
-										result.addAll(delta.getSource().getPosition(), orgData);
+        // moreDelta >= 0: just for overflow guard, not a normal condition
+        //noinspection OverflowingLoopIndex
+        for (int moreDelta = 0; moreDelta >= 0; moreDelta++) {
+            int pos = findPositionWithFuzzAndMoreDelta(ctx, delta, fuzz, moreDelta);
+            if (pos >= 0) {
+                return pos;
+            }
+            if (ctx.beforeOutRange && ctx.afterOutRange) {
+                break;
+            }
+        }
 
-								} else {
-										throw new UnsupportedOperationException(
-														"Not supported yet."); // To change body of generated methods, choose Tools | Templates.
-								}
-						};
+        return -1;
+    }
 
-		private ConflictOutput<T> conflictOutput = CONFLICT_PRODUCES_EXCEPTION;
+    // negative for not found
+    private int findPositionWithFuzzAndMoreDelta(
+            PatchApplyingContext<T> ctx, AbstractDelta<T> delta, int fuzz, int moreDelta) throws PatchFailedException {
+        // range check: can't apply before end of last patch
+        if (!ctx.beforeOutRange) {
+            int beginAt = ctx.defaultPosition - moreDelta + fuzz;
+            // We can't apply patch before end of last patch.
+            if (beginAt <= ctx.lastPatchEnd) {
+                ctx.beforeOutRange = true;
+            }
+        }
+        // range check: can't apply after end of result
+        if (!ctx.afterOutRange) {
+            int beginAt = ctx.defaultPosition + moreDelta + delta.getSource().size() - fuzz;
+            // We can't apply patch before end of last patch.
+            if (ctx.result.size() < beginAt) {
+                ctx.afterOutRange = true;
+            }
+        }
 
-		/**
-		 * Alter normal conflict output behaviour to e.g. include some conflict
-		 * statements in the result, like git does it.
-		 */
-		public Patch withConflictOutput(ConflictOutput<T> conflictOutput) {
-				this.conflictOutput = conflictOutput;
-				return this;
-		}
+        if (!ctx.beforeOutRange) {
+            VerifyChunk before = delta.getSource().verifyChunk(ctx.result, fuzz, ctx.defaultPosition - moreDelta);
+            if (before == VerifyChunk.OK) {
+                return ctx.defaultPosition - moreDelta;
+            }
+        }
+        if (!ctx.afterOutRange) {
+            VerifyChunk after = delta.getSource().verifyChunk(ctx.result, fuzz, ctx.defaultPosition + moreDelta);
+            if (after == VerifyChunk.OK) {
+                return ctx.defaultPosition + moreDelta;
+            }
+        }
+        return -1;
+    }
 
-		/**
-		 * Creates a new list, containing the restored state of the given list.
-		 * Opposite to {@link #applyTo(List)} method.
-		 *
-		 * @param target The list to copy and apply changes to.
-		 * @return A new list, containing the restored state.
-		 */
-		public List<T> restore(List<? extends T> target) {
-				List<T> result = new ArrayList<>(target);
-				restoreToExisting(result);
-				return result;
-		}
+    /**
+     * Standard Patch behaviour to throw an exception for pathching conflicts.
+     */
+    public final ConflictOutput<T> CONFLICT_PRODUCES_EXCEPTION =
+            (VerifyChunk verifyChunk, AbstractDelta<T> delta, List<T> result) -> {
+                throw new PatchFailedException("could not apply patch due to " + verifyChunk.toString());
+            };
 
-		/**
-		 * Restores all changes within the given list.
-		 * Opposite to {@link #applyToExisting(List)} method.
-		 *
-		 * @param target The list to restore changes in. This list has to be modifiable,
-		 *               otherwise exceptions may be thrown, depending on the used type of list.
-		 * @throws RuntimeException (or similar) if the list is not modifiable.
-		 */
-		public void restoreToExisting(List<T> target) {
-				ListIterator<AbstractDelta<T>> it = getDeltas().listIterator(deltas.size());
-				while (it.hasPrevious()) {
-						AbstractDelta<T> delta = it.previous();
-						delta.restore(target);
-				}
-		}
+    /**
+     * Git like merge conflict output.
+     */
+    public static final ConflictOutput<String> CONFLICT_PRODUCES_MERGE_CONFLICT =
+            (VerifyChunk verifyChunk, AbstractDelta<String> delta, List<String> result) -> {
+                if (result.size() > delta.getSource().getPosition()) {
+                    List<String> orgData = new ArrayList<>();
 
-		/**
-		 * Add the given delta to this patch
-		 *
-		 * @param delta the given delta
-		 */
-		public void addDelta(AbstractDelta<T> delta) {
-				deltas.add(delta);
-		}
+                    for (int i = 0; i < delta.getSource().size(); i++) {
+                        orgData.add(result.get(delta.getSource().getPosition()));
+                        result.remove(delta.getSource().getPosition());
+                    }
 
-		/**
-		 * Get the list of computed deltas
-		 *
-		 * @return the deltas
-		 */
-		public List<AbstractDelta<T>> getDeltas() {
-				deltas.sort(comparing(d -> d.getSource().getPosition()));
-				return deltas;
-		}
+                    orgData.add(0, "<<<<<< HEAD");
+                    orgData.add("======");
+                    orgData.addAll(delta.getSource().getLines());
+                    orgData.add(">>>>>>> PATCH");
 
-		@Override
-		public String toString() {
-				return "Patch{" + "deltas=" + deltas + '}';
-		}
+                    result.addAll(delta.getSource().getPosition(), orgData);
 
-		public static <T> Patch<T> generate(List<T> original, List<T> revised, List<Change> changes) {
-				return generate(original, revised, changes, false);
-		}
+                } else {
+                    throw new UnsupportedOperationException(
+                            "Not supported yet."); // To change body of generated methods, choose Tools | Templates.
+                }
+            };
 
-		private static <T> Chunk<T> buildChunk(int start, int end, List<? extends T> data) {
-				return new Chunk<>(start, new ArrayList<>(data.subList(start, end)));
-		}
+    private ConflictOutput<T> conflictOutput = CONFLICT_PRODUCES_EXCEPTION;
 
-		public static <T> Patch<T> generate(
-						List<? extends T> original, List<? extends T> revised, List<Change> _changes, boolean includeEquals) {
-				Patch<T> patch = new Patch<>(_changes.size());
-				int startOriginal = 0;
-				int startRevised = 0;
+    /**
+     * Alter normal conflict output behaviour to e.g. include some conflict
+     * statements in the result, like git does it.
+     */
+    public Patch withConflictOutput(ConflictOutput<T> conflictOutput) {
+        this.conflictOutput = conflictOutput;
+        return this;
+    }
 
-				List<Change> changes = _changes;
+    /**
+     * Creates a new list, containing the restored state of the given list.
+     * Opposite to {@link #applyTo(List)} method.
+     *
+     * @param target The list to copy and apply changes to.
+     * @return A new list, containing the restored state.
+     */
+    public List<T> restore(List<? extends T> target) {
+        List<T> result = new ArrayList<>(target);
+        restoreToExisting(result);
+        return result;
+    }
 
-				if (includeEquals) {
-						changes = new ArrayList<Change>(_changes);
-						Collections.sort(changes, comparing(d -> d.startOriginal));
-				}
+    /**
+     * Restores all changes within the given list.
+     * Opposite to {@link #applyToExisting(List)} method.
+     *
+     * @param target The list to restore changes in. This list has to be modifiable,
+     *               otherwise exceptions may be thrown, depending on the used type of list.
+     * @throws RuntimeException (or similar) if the list is not modifiable.
+     */
+    public void restoreToExisting(List<T> target) {
+        ListIterator<AbstractDelta<T>> it = getDeltas().listIterator(deltas.size());
+        while (it.hasPrevious()) {
+            AbstractDelta<T> delta = it.previous();
+            delta.restore(target);
+        }
+    }
 
-				for (Change change : changes) {
+    /**
+     * Add the given delta to this patch
+     *
+     * @param delta the given delta
+     */
+    public void addDelta(AbstractDelta<T> delta) {
+        deltas.add(delta);
+    }
 
-						if (includeEquals && startOriginal < change.startOriginal) {
-								patch.addDelta(new EqualDelta<T>(
-												buildChunk(startOriginal, change.startOriginal, original),
-												buildChunk(startRevised, change.startRevised, revised)));
-						}
+    /**
+     * Get the list of computed deltas
+     *
+     * @return the deltas
+     */
+    public List<AbstractDelta<T>> getDeltas() {
+        deltas.sort(comparing(d -> d.getSource().getPosition()));
+        return deltas;
+    }
 
-						Chunk<T> orgChunk = buildChunk(change.startOriginal, change.endOriginal, original);
-						Chunk<T> revChunk = buildChunk(change.startRevised, change.endRevised, revised);
-						switch (change.deltaType) {
-								case DELETE:
-										patch.addDelta(new DeleteDelta<>(orgChunk, revChunk));
-										break;
-								case INSERT:
-										patch.addDelta(new InsertDelta<>(orgChunk, revChunk));
-										break;
-								case CHANGE:
-										patch.addDelta(new ChangeDelta<>(orgChunk, revChunk));
-										break;
-								default:
-						}
+    @Override
+    public String toString() {
+        return "Patch{" + "deltas=" + deltas + '}';
+    }
 
-						startOriginal = change.endOriginal;
-						startRevised = change.endRevised;
-				}
+    public static <T> Patch<T> generate(List<T> original, List<T> revised, List<Change> changes) {
+        return generate(original, revised, changes, false);
+    }
 
-				if (includeEquals && startOriginal < original.size()) {
-						patch.addDelta(new EqualDelta<T>(
-										buildChunk(startOriginal, original.size(), original),
-										buildChunk(startRevised, revised.size(), revised)));
-				}
+    private static <T> Chunk<T> buildChunk(int start, int end, List<? extends T> data) {
+        return new Chunk<>(start, new ArrayList<>(data.subList(start, end)));
+    }
 
-				return patch;
-		}
+    public static <T> Patch<T> generate(
+            List<? extends T> original, List<? extends T> revised, List<Change> _changes, boolean includeEquals) {
+        Patch<T> patch = new Patch<>(_changes.size());
+        int startOriginal = 0;
+        int startRevised = 0;
+
+        List<Change> changes = _changes;
+
+        if (includeEquals) {
+            changes = new ArrayList<Change>(_changes);
+            Collections.sort(changes, comparing(d -> d.startOriginal));
+        }
+
+        for (Change change : changes) {
+
+            if (includeEquals && startOriginal < change.startOriginal) {
+                patch.addDelta(new EqualDelta<T>(
+                        buildChunk(startOriginal, change.startOriginal, original),
+                        buildChunk(startRevised, change.startRevised, revised)));
+            }
+
+            Chunk<T> orgChunk = buildChunk(change.startOriginal, change.endOriginal, original);
+            Chunk<T> revChunk = buildChunk(change.startRevised, change.endRevised, revised);
+            switch (change.deltaType) {
+                case DELETE:
+                    patch.addDelta(new DeleteDelta<>(orgChunk, revChunk));
+                    break;
+                case INSERT:
+                    patch.addDelta(new InsertDelta<>(orgChunk, revChunk));
+                    break;
+                case CHANGE:
+                    patch.addDelta(new ChangeDelta<>(orgChunk, revChunk));
+                    break;
+                default:
+            }
+
+            startOriginal = change.endOriginal;
+            startRevised = change.endRevised;
+        }
+
+        if (includeEquals && startOriginal < original.size()) {
+            patch.addDelta(new EqualDelta<T>(
+                    buildChunk(startOriginal, original.size(), original),
+                    buildChunk(startRevised, revised.size(), revised)));
+        }
+
+        return patch;
+    }
 }
