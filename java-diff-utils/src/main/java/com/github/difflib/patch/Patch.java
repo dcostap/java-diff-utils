@@ -60,7 +60,15 @@ public final class Patch<T> implements Serializable {
         // use single-pass construction to avoid O(N^2) shifting behavior.
         if (conflictOutput == CONFLICT_PRODUCES_EXCEPTION) {
             List<AbstractDelta<T>> sortedDeltas = getDeltas();
-            List<T> result = new ArrayList<>(target.size());
+
+            // Pre-calculate exact size to prevent ArrayList resizing (array copying)
+            int deltaSizeChange = 0;
+            for (AbstractDelta<T> delta : sortedDeltas) {
+                deltaSizeChange += delta.getTarget().size() - delta.getSource().size();
+            }
+            int resultSize = target.size() + deltaSizeChange;
+            List<T> result = new ArrayList<>(Math.max(0, resultSize));
+
             int cursor = 0;
 
             for (AbstractDelta<T> delta : sortedDeltas) {
