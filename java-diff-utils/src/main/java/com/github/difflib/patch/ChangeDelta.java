@@ -21,67 +21,83 @@ import java.util.Objects;
 /**
  * Describes the change-delta between original and revised texts.
  *
- * @author <a href="dm.naumenko@gmail.com">Dmitry Naumenko</a>
  * @param <T> The type of the compared elements in the data 'lines'.
+ * @author <a href="dm.naumenko@gmail.com">Dmitry Naumenko</a>
  */
 public final class ChangeDelta<T> extends AbstractDelta<T> {
 
-		/**
-		 * Creates a change delta with the two given chunks.
-		 *
-		 * @param source The source chunk. Must not be {@code null}.
-		 * @param target The target chunk. Must not be {@code null}.
-		 */
-		public ChangeDelta(Chunk<T> source, Chunk<T> target) {
-				super(DeltaType.CHANGE, source, target);
-				Objects.requireNonNull(source, "source must not be null");
-				Objects.requireNonNull(target, "target must not be null");
-		}
+    /**
+     * Creates a change delta with the two given chunks.
+     *
+     * @param source The source chunk. Must not be {@code null}.
+     * @param target The target chunk. Must not be {@code null}.
+     */
+    public ChangeDelta(Chunk<T> source, Chunk<T> target) {
+        super(DeltaType.CHANGE, source, target);
+        Objects.requireNonNull(source, "source must not be null");
+        Objects.requireNonNull(target, "target must not be null");
+    }
 
-		@Override
-		protected void applyTo(List<T> target) throws PatchFailedException {
-				int position = getSource().getPosition();
-				int size = getSource().size();
+    @Override
+    protected void applyTo(List<T> target) throws PatchFailedException {
+        int position = getSource().getPosition();
+        List<T> newLines = getTarget().getLines();
+        int oldSize = getSource().size();
+        int newSize = newLines.size();
 
-				target.subList(position, position + size).clear();
-				target.addAll(position, getTarget().getLines());
-		}
+        // Find how many lines usually overlap
+        int commonSize = Math.min(oldSize, newSize);
 
-		@Override
-		protected void restore(List<T> target) {
-				int position = getTarget().getPosition();
-				int size = getTarget().size();
-				for (int i = 0; i < size; i++) {
-						target.remove(position);
-				}
-				int i = 0;
-				for (T line : getSource().getLines()) {
-						target.add(position + i, line);
-						i++;
-				}
-		}
+        // 1. Overwrite existing elements (Zero array shifting)
+        for (int i = 0; i < commonSize; i++) {
+            target.set(position + i, newLines.get(i));
+        }
 
-		protected void applyFuzzyToAt(List<T> target, int fuzz, int position) throws PatchFailedException {
-				int size = getSource().size();
-				for (int i = fuzz; i < size - fuzz; i++) {
-						target.remove(position + fuzz);
-				}
+        // 2. Handle the difference
+        if (newSize > oldSize) {
+            // New content is larger: Insert the remainder
+            target.addAll(position + commonSize, newLines.subList(commonSize, newSize));
+        } else if (oldSize > newSize) {
+            // New content is smaller: Delete the remainder
+            target.subList(position + commonSize, position + oldSize).clear();
+        }
+    }
 
-				int i = fuzz;
-				for (T line : getTarget().getLines().subList(fuzz, getTarget().size() - fuzz)) {
-						target.add(position + i, line);
-						i++;
-				}
-		}
+    @Override
+    protected void restore(List<T> target) {
+        int position = getTarget().getPosition();
+        int size = getTarget().size();
+        for (int i = 0; i < size; i++) {
+            target.remove(position);
+        }
+        int i = 0;
+        for (T line : getSource().getLines()) {
+            target.add(position + i, line);
+            i++;
+        }
+    }
 
-		@Override
-		public String toString() {
-				return "[ChangeDelta, position: " + getSource().getPosition() + ", lines: "
-								+ getSource().getLines() + " to " + getTarget().getLines() + "]";
-		}
+    protected void applyFuzzyToAt(List<T> target, int fuzz, int position) throws PatchFailedException {
+        int size = getSource().size();
+        for (int i = fuzz; i < size - fuzz; i++) {
+            target.remove(position + fuzz);
+        }
 
-		@Override
-		public AbstractDelta<T> withChunks(Chunk<T> original, Chunk<T> revised) {
-				return new ChangeDelta<T>(original, revised);
-		}
+        int i = fuzz;
+        for (T line : getTarget().getLines().subList(fuzz, getTarget().size() - fuzz)) {
+            target.add(position + i, line);
+            i++;
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "[ChangeDelta, position: " + getSource().getPosition() + ", lines: "
+                + getSource().getLines() + " to " + getTarget().getLines() + "]";
+    }
+
+    @Override
+    public AbstractDelta<T> withChunks(Chunk<T> original, Chunk<T> revised) {
+        return new ChangeDelta<T>(original, revised);
+    }
 }

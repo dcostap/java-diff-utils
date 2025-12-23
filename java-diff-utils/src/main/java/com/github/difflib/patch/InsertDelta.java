@@ -20,47 +20,46 @@ import java.util.List;
 /**
  * Describes the add-delta between original and revised texts.
  *
- * @author <a href="dm.naumenko@gmail.com">Dmitry Naumenko</a>
  * @param <T> The type of the compared elements in the 'lines'.
+ * @author <a href="dm.naumenko@gmail.com">Dmitry Naumenko</a>
  */
 public final class InsertDelta<T> extends AbstractDelta<T> {
 
-		/**
-		 * Creates an insert delta with the two given chunks.
-		 *
-		 * @param original The original chunk. Must not be {@code null}.
-		 * @param revised The original chunk. Must not be {@code null}.
-		 */
-		public InsertDelta(Chunk<T> original, Chunk<T> revised) {
-				super(DeltaType.INSERT, original, revised);
-		}
+    /**
+     * Creates an insert delta with the two given chunks.
+     *
+     * @param original The original chunk. Must not be {@code null}.
+     * @param revised  The original chunk. Must not be {@code null}.
+     */
+    public InsertDelta(Chunk<T> original, Chunk<T> revised) {
+        super(DeltaType.INSERT, original, revised);
+    }
 
-		@Override
-		protected void applyTo(List<T> target) throws PatchFailedException {
-				int position = this.getSource().getPosition();
-				List<T> lines = this.getTarget().getLines();
-				for (int i = 0; i < lines.size(); i++) {
-						target.add(position + i, lines.get(i));
-				}
-		}
+    @Override
+    protected void applyTo(List<T> target) throws PatchFailedException {
+        int position = this.getSource().getPosition();
+        List<T> lines = this.getTarget().getLines();
+        // Batch insert triggers only one array shift
+        target.addAll(position, lines);
+    }
 
-		@Override
-		protected void restore(List<T> target) {
-				int position = getTarget().getPosition();
-				int size = getTarget().size();
-				for (int i = 0; i < size; i++) {
-						target.remove(position);
-				}
-		}
+    @Override
+    protected void restore(List<T> target) {
+        int position = getTarget().getPosition();
+        int size = getTarget().size();
+        for (int i = 0; i < size; i++) {
+            target.remove(position);
+        }
+    }
 
-		@Override
-		public String toString() {
-				return "[InsertDelta, position: " + getSource().getPosition() + ", lines: "
-								+ getTarget().getLines() + "]";
-		}
+    @Override
+    public String toString() {
+        return "[InsertDelta, position: " + getSource().getPosition() + ", lines: "
+                + getTarget().getLines() + "]";
+    }
 
-		@Override
-		public AbstractDelta<T> withChunks(Chunk<T> original, Chunk<T> revised) {
-				return new InsertDelta<T>(original, revised);
-		}
+    @Override
+    public AbstractDelta<T> withChunks(Chunk<T> original, Chunk<T> revised) {
+        return new InsertDelta<T>(original, revised);
+    }
 }
